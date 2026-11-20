@@ -137,3 +137,7 @@ popup.html       弹窗结构
 popup.css        样式
 popup.js         读缓存渲染 + 设置 / 搜索 / 自选股 / 备份管理
 ```
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。

@@ -140,3 +140,7 @@ popup.js         Rendering, settings, search, watchlist and backups
 README.md        Simplified Chinese documentation
 README.en.md     English documentation
 ```
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
