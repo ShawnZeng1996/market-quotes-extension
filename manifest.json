@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "行情助手（TickFlow）",
+  "version": "1.5.0",
+  "description": "实时显示自选股行情，支持腾讯（免费）、TickFlow（需 API Key）与币安数据源。后台常驻连接，支持独立悬浮窗。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "行情助手",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage", "offscreen", "alarms"],
+  "host_permissions": [
+    "https://api.tickflow.org/*",
+    "https://api.day.app/*",
+    "https://qt.gtimg.cn/*",
+    "https://web.sqt.gtimg.cn/*",
+    "https://smartbox.gtimg.cn/*",
+    "https://data-api.binance.vision/*",
+    "https://fapi.binance.com/*",
+    "https://push2.eastmoney.com/*",
+    "https://push2his.eastmoney.com/*"
+  ]
+}

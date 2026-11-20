@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+  <link rel="stylesheet" href="popup.css">
+  <title>行情助手</title>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <span class="logo">行情</span>
+      </div>
+      <div class="header-actions">
+        <span id="status" class="status status--idle" title="点击重连">
+          <i class="dot"></i><span id="status-text">未连接</span>
+        </span>
+        <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <section id="settings" class="settings hidden">
+      <div class="field">
+        <span class="field-label">数据源</span>
+        <div class="seg" id="source-seg">
+          <button type="button" class="seg-btn" data-source="tickflow">TickFlow（需 Key）</button>
+          <button type="button" class="seg-btn" data-source="tencent">腾讯（免费）</button>
+        </div>
+        <span class="field-hint" id="source-hint"></span>
+      </div>
+
+      <div class="field">
+        <span class="field-label" id="trading-markets-label">交易市场</span>
+        <div class="seg" id="trading-markets" role="group" aria-labelledby="trading-markets-label">
+          <button type="button" class="seg-btn" data-market="cn" aria-pressed="false">A股</button>
+          <button type="button" class="seg-btn" data-market="hk" aria-pressed="false">港股</button>
+          <button type="button" class="seg-btn" data-market="us" aria-pressed="false">美股</button>
+          <button type="button" class="seg-btn" data-market="crypto" aria-pressed="false">币安</button>
+        </div>
+        <span class="field-hint">可多选，至少选择一个市场</span>
+      </div>
+
+      <div class="field">
+        <span class="field-label" id="footer-quotes-label">底部关注行情</span>
+        <div id="footer-options" class="footer-options" role="group" aria-labelledby="footer-quotes-label"></div>
+        <span class="field-hint">可全部取消；港股指数由腾讯提供，币安为 USDT 永续合约</span>
+      </div>
+
+      <div class="field" id="field-tickflow">
+        <span class="field-label">TickFlow API Key</span>
+        <input id="api-key" type="password" placeholder="粘贴 TickFlow API Key" autocomplete="off" spellcheck="false">
+        <span class="field-hint">在 <a href="https://tickflow.org" target="_blank" rel="noopener">tickflow.org</a> 控制台生成</span>
+        <div class="key-test-row">
+          <button type="button" class="btn btn--mini" id="btn-test-tickflow">测试</button>
+          <span class="key-test-result" id="test-tickflow-result"></span>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">Bark 推送 Key（可选）</span>
+        <input id="bark-key" type="text" placeholder="Bark App 的推送 Key" autocomplete="off" spellcheck="false">
+        <span class="field-hint">在 Bark App 首页查看推送 Key（只填 Key 本体，无需带地址）</span>
+        <div class="key-test-row">
+          <button type="button" class="btn btn--mini" id="btn-test-bark">测试推送</button>
+          <span class="key-test-result" id="test-bark-result"></span>
+        </div>
+      </div>
+
+      <div class="switch-row">
+        <div class="switch-text">
+          <span class="switch-label">获取行情</span>
+          <span class="switch-desc">关闭后暂停后台行情获取</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggle-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="switch-row">
+        <div class="switch-text">
+          <span class="switch-label">悬浮窗口</span>
+          <span class="switch-desc">点击图标打开独立小窗，不随点击网页消失</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggle-float">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="switch-row">
+        <div class="switch-text">
+          <span class="switch-label">Bark 推送</span>
+          <span class="switch-desc">扭亏为盈时推送到手机</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggle-bark">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="field-label">自选股备份</span>
+        <div class="backup-row">
+          <button type="button" class="btn btn--mini" id="btn-export">导出 JSON</button>
+          <button type="button" class="btn btn--mini" id="btn-import">导入 JSON</button>
+          <input id="import-file" type="file" accept=".json,application/json" hidden>
+        </div>
+        <span class="field-hint">导出为 JSON 文件（含成本价），换设备后点导入即可恢复</span>
+      </div>
+
+      <button id="btn-save-key" class="btn btn--primary">保存 Key</button>
+    </section>
+
+    <section id="empty" class="empty hidden">
+      <p>还没有自选股</p>
+      <p class="hint">在下方输入代码添加，例如 600000.SH、AAPL.US</p>
+    </section>
+
+    <ul id="watchlist" class="list"></ul>
+
+    <footer class="footer">
+      <div class="seg market-seg" id="market-seg" title="选择要搜索/添加的市场">
+        <button type="button" class="seg-btn active" data-market="auto">全部</button>
+        <button type="button" class="seg-btn" data-market="cn">A股</button>
+        <button type="button" class="seg-btn" data-market="hk">港股</button>
+        <button type="button" class="seg-btn" data-market="us">美股</button>
+        <button type="button" class="seg-btn" data-market="crypto">币安</button>
+      </div>
+      <form id="add-form" autocomplete="off">
+        <input id="symbol-input" type="text" placeholder="代码或名称，如 600000.SH / 浦发 / BTCUSDT" spellcheck="false">
+        <input id="cost-input" type="number" step="any" min="0" placeholder="成本(可选)" spellcheck="false">
+        <button type="submit" class="btn btn--primary">添加</button>
+      </form>
+      <div id="search-results" class="search-results hidden"></div>
+      <p id="error" class="error hidden"></p>
+    </footer>
+
+    <div id="indices" class="indices"></div>
+    <section id="market-turnover" class="market-turnover hidden" aria-label="A股成交额"></section>
+  </div>
+
+  <script src="market-config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
