@@ -28,6 +28,7 @@ let futuresTimer = null;
 let hkIndexTimer = null;
 let turnoverTimer = null;
 let turnoverPendingRun = null;
+let turnoverPendingTask = null;
 let marketTurnover = null;
 let futuresStatus = null;
 let hkIndexStatus = null;
@@ -478,17 +479,23 @@ function publishMarketTurnover(data) {
   send({ type: "market-turnover", data });
 }
 
-async function pollMarketTurnoverOnce() {
-  if (stopped || !enabled || !tradingMarkets.includes("cn") || turnoverPendingRun === generation) return;
+function pollMarketTurnoverOnce() {
+  if (stopped || !enabled || !tradingMarkets.includes("cn")) return Promise.resolve({ ok: false });
+  if (turnoverPendingRun === generation) return turnoverPendingTask;
   const run = generation;
   turnoverPendingRun = run;
+  turnoverPendingTask = fetchMarketTurnover(run);
+  return turnoverPendingTask;
+}
+
+async function fetchMarketTurnover(run) {
   try {
     const results = await Promise.allSettled([TURNOVER_QUOTE_URL, TURNOVER_TRENDS_URL].map(async (url) => {
       const resp = await fetch(url, { credentials: "omit", cache: "no-store", signal: AbortSignal.timeout(10000) });
       if (!resp.ok) throw new Error("成交额获取失败");
       return resp.json();
     }));
-    if (run !== generation || stopped) return;
+    if (run !== generation || stopped) return { ok: false };
     if (results[0].status !== "fulfilled") throw new Error("成交额获取失败");
     const quote = parseTurnoverQuote(results[0].value);
     let comparison = null;
@@ -505,13 +512,18 @@ async function pollMarketTurnoverOnce() {
       comparisonTime: null, previousDate: null, ...comparison, comparisonError, error: false });
     turnoverStatus = { ok: !comparisonError, text: comparisonError ? "A股成交额 · 同期获取失败" : "A股成交额 · 轮询中" };
     emitStatus();
+    return { ok: true };
   } catch (e) {
-    if (run !== generation || stopped) return;
+    if (run !== generation || stopped) return { ok: false };
     publishMarketTurnover({ ...marketTurnover, error: true });
     turnoverStatus = { ok: false, text: "A股成交额 · 获取失败" };
     emitStatus();
+    return { ok: false };
   } finally {
-    if (turnoverPendingRun === run) turnoverPendingRun = null;
+    if (turnoverPendingRun === run) {
+      turnoverPendingRun = null;
+      turnoverPendingTask = null;
+    }
   }
 }
 
@@ -699,8 +711,13 @@ function applyConfig(cfg) {
 }
 
 // 接收 SW 下发的配置变化
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "config-changed") applyConfig(msg);
+  if (msg && msg.type === "refresh-turnover") {
+    applyConfig(msg);
+    pollMarketTurnoverOnce().then(sendResponse);
+    return true;
+  }
 });
 
 // 启动：向 SW 请求配置

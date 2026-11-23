@@ -21,6 +21,7 @@ const state = {
   apiKey: "",
   enabled: true,        // 是否获取行情
   floatWindow: true,    // 是否悬浮窗口
+  theme: "system",
   barkKey: "",          // Bark 推送 Key
   barkEnabled: false,   // Bark 推送开关
   tradingMarkets: MARKET_GROUPS.map((g) => g.key),
@@ -29,6 +30,8 @@ const state = {
   watchlist: [],        // [{ symbol, name }]
   quotes: {},           // symbol -> quote（来自后台）
   marketTurnover: null,
+  turnoverRefreshing: false,
+  turnoverRefreshError: false,
   status: { mode: "idle", text: "未连接" },
 };
 
@@ -38,11 +41,16 @@ let editCaret = null; // 编辑框光标位置（同上，避免重建后光标�
 const collapsedGroups = new Set(); // 已折叠的市场分组 key（render 重建后保持折叠状态）
 
 const $ = (sel) => document.querySelector(sel);
+const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+
+function normalizeTheme(theme) {
+  return theme === "light" || theme === "dark" ? theme : "system";
+}
 
 // ==================== 存储 ====================
 async function loadSettings() {
   const [local, sync] = await Promise.all([
-    chrome.storage.local.get(["source", "apiKey", "quotes", "status", "enabled", "floatWindow", "barkKey", "barkEnabled", "tradingMarkets", "footerSymbols", "marketTurnover"]),
+    chrome.storage.local.get(["source", "apiKey", "quotes", "status", "enabled", "floatWindow", "theme", "barkKey", "barkEnabled", "tradingMarkets", "footerSymbols", "marketTurnover"]),
     chrome.storage.sync.get("watchlist"),
   ]);
   state.tradingMarkets = normalizeTradingMarkets(local.tradingMarkets);
@@ -51,6 +59,7 @@ async function loadSettings() {
   state.apiKey = local.apiKey || "";
   state.enabled = local.enabled !== false;
   state.floatWindow = local.floatWindow !== false;
+  state.theme = normalizeTheme(local.theme);
   state.barkKey = local.barkKey || "";
   state.barkEnabled = local.barkEnabled === true;
   state.quotes = local.quotes || {};
@@ -220,12 +229,18 @@ function renderMarketTurnover() {
   const diff = data && Number.isFinite(data.comparisonAmount) && Number.isFinite(data.previousAmount)
     ? data.comparisonAmount - data.previousAmount : null;
   const time = data && data.date && data.time ? `${data.date.slice(5)} ${data.time}` : "";
-  const status = !state.enabled ? "已暂停" : data && data.error ? "更新失败" : !data ? "获取中" : "";
+  const status = !state.enabled ? "已暂停" : state.turnoverRefreshError || data && data.error ? "更新失败" : !data ? "获取中" : "";
   const comparisonTime = [data && data.comparisonTime, data && data.comparisonError ? "更新失败" : ""].filter(Boolean).join(" · ") || "暂无同期数据";
   const comparisonTitle = data && data.previousDate && data.comparisonTime
     ? `与 ${data.previousDate} ${data.comparisonTime} 的累计成交额比较` : "与上一交易日同一时刻的累计成交额比较";
   el.innerHTML = `<div class="turnover-row">
-    <span class="turnover-label">A股成交额</span>
+    <span class="turnover-label turnover-heading">A股成交额<button type="button"
+      class="turnover-refresh${state.turnoverRefreshing ? " is-refreshing" : ""}"
+      title="${state.turnoverRefreshing ? "刷新中" : !state.enabled ? "已暂停" : "刷新成交额"}"
+      aria-label="刷新成交额" aria-busy="${state.turnoverRefreshing}"${!state.enabled || state.turnoverRefreshing ? " disabled" : ""}>
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16M8 16H3v5"/>
+      </svg></button></span>
     <span class="turnover-value">${formatTurnover(data && data.amount)}</span>
     <span class="turnover-time">${escapeHtml([time, status].filter(Boolean).join(" · "))}</span>
   </div>
@@ -234,6 +249,22 @@ function renderMarketTurnover() {
     <span class="turnover-diff ${changeClass(diff)}">${formatTurnover(diff, true)}</span>
     <span class="turnover-time">${escapeHtml(comparisonTime)}</span>
   </div>`;
+}
+
+async function refreshMarketTurnover() {
+  if (state.turnoverRefreshing || !state.enabled || !state.tradingMarkets.includes("cn")) return;
+  state.turnoverRefreshing = true;
+  state.turnoverRefreshError = false;
+  renderMarketTurnover();
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "refresh-market-turnover" });
+    state.turnoverRefreshError = !result || !result.ok;
+  } catch (e) {
+    state.turnoverRefreshError = true;
+  } finally {
+    state.turnoverRefreshing = false;
+    renderMarketTurnover();
+  }
 }
 
 function renderIndices() {
@@ -897,7 +928,34 @@ async function importWatchlist(file) {
 }
 
 // ==================== 设置 ====================
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme === "system"
+    ? (systemTheme.matches ? "dark" : "light")
+    : state.theme;
+  $("#theme-seg").querySelectorAll(".seg-btn").forEach((btn) => {
+    const selected = btn.dataset.theme === state.theme;
+    btn.classList.toggle("active", selected);
+    btn.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+async function onThemeChange(theme) {
+  if (!["system", "light", "dark"].includes(theme) || theme === state.theme) return;
+  const buttons = $("#theme-seg").querySelectorAll(".seg-btn");
+  buttons.forEach((btn) => { btn.disabled = true; });
+  try {
+    await chrome.storage.local.set({ theme });
+    state.theme = theme;
+    applyTheme();
+  } catch (e) {
+    showError("保存失败，请稍后重试");
+  } finally {
+    buttons.forEach((btn) => { btn.disabled = false; });
+  }
+}
+
 function renderSettings() {
+  applyTheme();
   $("#api-key").value = state.apiKey;
   $("#bark-key").value = state.barkKey;
   $("#toggle-enabled").checked = state.enabled;
@@ -1026,6 +1084,10 @@ function bindEvents() {
 
   $("#btn-save-key").addEventListener("click", onSaveKey);
 
+  $("#market-turnover").addEventListener("click", (e) => {
+    if (e.target.closest(".turnover-refresh")) refreshMarketTurnover();
+  });
+
   $("#btn-test-tickflow").addEventListener("click", testTickflowKey);
 
   $("#btn-test-bark").addEventListener("click", testBarkKey);
@@ -1041,6 +1103,14 @@ function bindEvents() {
   $("#source-seg").addEventListener("click", (e) => {
     const btn = e.target.closest(".seg-btn");
     if (btn) onSourceChange(btn.dataset.source);
+  });
+
+  $("#theme-seg").addEventListener("click", (e) => {
+    const btn = e.target.closest(".seg-btn");
+    if (btn) onThemeChange(btn.dataset.theme);
+  });
+  systemTheme.addEventListener("change", () => {
+    if (state.theme === "system") applyTheme();
   });
 
   $("#trading-markets").addEventListener("click", (e) => {
@@ -1181,6 +1251,7 @@ function bindEvents() {
 
 // ==================== 初始化 ====================
 async function init() {
+  applyTheme();
   await loadSettings();
   renderSettings();
   bindEvents();
@@ -1199,10 +1270,18 @@ async function init() {
 document.addEventListener("DOMContentLoaded", init);
 
 // 后台行情/状态/自选股/开关变化时实时刷新（弹窗与悬浮窗同时打开时互相同步）
-chrome.storage.onChanged.addListener((changes) => {
+chrome.storage.onChanged.addListener((changes, areaName) => {
   let need = false;
+  if (areaName === "local" && changes.theme) {
+    state.theme = normalizeTheme(changes.theme.newValue);
+    applyTheme();
+  }
   if (changes.quotes) { state.quotes = changes.quotes.newValue || {}; need = true; }
-  if (changes.marketTurnover) { state.marketTurnover = changes.marketTurnover.newValue || null; need = true; }
+  if (changes.marketTurnover) {
+    state.marketTurnover = changes.marketTurnover.newValue || null;
+    state.turnoverRefreshError = false;
+    need = true;
+  }
   if (changes.status) { state.status = changes.status.newValue || { mode: "idle", text: "未连接" }; need = true; }
   if (changes.watchlist) { state.watchlist = Array.isArray(changes.watchlist.newValue) ? changes.watchlist.newValue : []; need = true; }
   if (changes.apiKey) { state.apiKey = changes.apiKey.newValue || ""; need = true; }

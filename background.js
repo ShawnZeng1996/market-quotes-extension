@@ -115,6 +115,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         .catch(() => sendResponse({ apiKey: "", enabled: true, source: "tencent", watchlist: [] }));
       return true;
 
+    case "refresh-market-turnover":
+      ensureOffscreen()
+        .then(readConfig)
+        .then((config) => chrome.runtime.sendMessage({ type: "refresh-turnover", ...config }))
+        .then(sendResponse)
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+
     case "quotes": // 来自 offscreen，行情落盘
       chrome.storage.local.set({ quotes: msg.data }).catch(() => {});
       return false;

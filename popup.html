@@ -23,6 +23,15 @@
 
     <section id="settings" class="settings hidden">
       <div class="field">
+        <span class="field-label" id="theme-label">显示模式</span>
+        <div class="seg" id="theme-seg" role="group" aria-labelledby="theme-label">
+          <button type="button" class="seg-btn" data-theme="system" aria-pressed="true">跟随系统</button>
+          <button type="button" class="seg-btn" data-theme="light" aria-pressed="false">日间</button>
+          <button type="button" class="seg-btn" data-theme="dark" aria-pressed="false">夜间</button>
+        </div>
+      </div>
+
+      <div class="field">
         <span class="field-label">数据源</span>
         <div class="seg" id="source-seg">
           <button type="button" class="seg-btn" data-source="tickflow">TickFlow（需 Key）</button>

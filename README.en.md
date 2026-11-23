@@ -22,6 +22,7 @@ A Chrome extension for mainland Chinese, Hong Kong and US stocks, plus Binance U
 - Import and export the watchlist as JSON, including names, cost prices and profit-alert settings.
 - API and Bark keys stay in `chrome.storage.local` and are not synced across devices.
 - Red for gains, green for losses; adaptive decimal precision for Binance prices.
+- **Display mode:** System / Light / Dark, following the system appearance by default, with the preference saved locally.
 - Profit-crossing alerts: when an enabled symbol moves from a loss to a profit relative to its cost price, play a sound and show a toolbar badge. Optional Bark notifications require enabling push and saving a Bark key.
 - Pause or resume all quote fetching. Choose between a separate floating window and a regular toolbar popup.
 
@@ -53,6 +54,15 @@ Only TickFlow requires setup:
 2. Generate an API key in the dashboard.
 3. Open the extension settings, select TickFlow, paste the key and save it.
 
+## Display Mode
+
+Open settings and select a display mode. Changes apply immediately; there is no need to click the key-save button.
+
+- **System** (default): use the system's light or dark appearance and automatically update when it changes.
+- **Light / Dark:** keep the selected appearance regardless of system changes.
+- The preference is saved in `chrome.storage.local`, retained when reopening, and not synced through the Chrome account. Simultaneously open popup and floating windows update together.
+- Switching display modes does not affect quote fetching or interrupt cost editing.
+
 ## Markets and Footer Quotes
 
 - **Markets:** all four markets are enabled by default; at least one must remain enabled. Searching, adding and importing only accept enabled markets. If only one market is enabled, the add area uses it automatically and hides the scope buttons.
@@ -70,6 +80,7 @@ Only TickFlow requires setup:
 
 When mainland China is enabled, the footer automatically displays **cumulative turnover across Shanghai, Shenzhen and Beijing A-shares**, in units of CNY 100 million (`亿`). It remains visible even when all footer indices are deselected. Eastmoney data is requested independently every 5 seconds, without an API key and regardless of the stock provider.
 
+- Click the refresh icon beside the A-share turnover label to update both turnover and the same-minute comparison. The icon spins and is disabled during refreshing, and is unavailable while fetching is paused. In-flight automatic and manual refreshes share requests without reconnecting other quote channels.
 - The comparison uses cumulative turnover at the **same minute of the previous trading day**, with a red `+` for an increase and a green `-` for a decrease. Historical intraday data comes from the server; the extension need not have been open the previous day.
 - Live turnover and the comparison have separate timestamps. Only completed minutes available on both days are compared, so the comparison may lag slightly behind the live total. Neither yesterday's full-day total nor an unfinished minute is used for the difference.
 - Trading dates come from the API. On non-trading days, the actual data date is retained rather than relabeled as today. Missing comparison data is shown as `—`. Fetch failures retain available data and show an update-failed indicator.
@@ -120,7 +131,7 @@ offscreen.js ── quotes / status messages ──▶ background.js (SW)
 - **TickFlow:** symbol counts and refresh limits depend on current plan and API permissions. Rejected WebSocket access falls back to REST. Missing or invalid keys are reported.
 - **Binance:** futures use `fapi.binance.com`; legacy spot uses `data-api.binance.vision`. Neither requires a key. Polling does not guarantee that every product trades all day or always has a fresh quote.
 - **Watchlist capacity:** `chrome.storage.sync` has an 8 KB per-item limit. Capacity depends on symbol and name lengths. Failed saves are reported; reduce entries or export a JSON backup. Backups contain only the watchlist, not keys or other settings.
-- **Sync scope:** the watchlist syncs through the Chrome account. Provider choice, keys, enabled markets, footer selections and switches are local to the device.
+- **Sync scope:** the watchlist syncs through the Chrome account. Provider choice, keys, enabled markets, footer selections, display mode and switches are local to the device.
 - **Background lifecycle:** the offscreen document is created at browser startup, extension load or popup opening. A Service Worker alarm checks every 5 minutes and recreates it if missing. Pausing fetching stops all quote channels.
 - **Floating window:** enabled by default. Chrome has no always-on-top window API, so other windows may cover it. It stays open when clicking a webpage; it is not guaranteed to remain on top. Disable the option for a regular popup.
 - **Icons:** built-in blue rounded chart icons at 16 / 32 / 48 / 128 pixels are used for the toolbar, extension list and standalone window. Reload the extension and reopen its window after icon changes.
