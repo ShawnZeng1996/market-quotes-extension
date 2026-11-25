@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "行情助手（TickFlow）",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "实时显示自选股行情，支持腾讯（免费）、TickFlow（需 API Key）与币安数据源。后台常驻连接，支持独立悬浮窗。",
   "icons": {
     "16": "icons/icon-16.png",
