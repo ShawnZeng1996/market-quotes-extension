@@ -26,17 +26,20 @@ const state = {
   barkEnabled: false,   // Bark 推送开关
   tradingMarkets: MARKET_GROUPS.map((g) => g.key),
   footerSymbols: normalizeFooterSymbols(),
-  editingSymbol: null,  // 正在编辑成本的自选股
+  editingSymbol: null,
   watchlist: [],        // [{ symbol, name }]
   quotes: {},           // symbol -> quote（来自后台）
   marketTurnover: null,
   turnoverRefreshing: false,
   turnoverRefreshError: false,
+  reconnecting: false,
   status: { mode: "idle", text: "未连接" },
 };
 
-let editDraft = "";   // 编辑中尚未保存的成本草稿（render 重建 DOM 时用于恢复）
-let editCaret = null; // 编辑框光标位置（同上，避免重建后光标跳到开头）
+let editDraft = {};
+let editField = "cost";
+let editSelection = null;
+let editRevision = 0;
 
 const collapsedGroups = new Set(); // 已折叠的市场分组 key（render 重建后保持折叠状态）
 
@@ -199,18 +202,55 @@ function sessionBadge(q) {
   return `<span class="${cls}">${escapeHtml(label)}</span>`;
 }
 
-function parseCost(raw) {
-  if (raw == null || String(raw).trim() === "") return null;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : null;
+function parsePositionFields(raw, symbol) {
+  const fields = {};
+  for (const [key, label] of [["cost", "成本价"], ["quantity", "数量"]]) {
+    const value = raw[key];
+    const blank = value == null || (typeof value === "string" && value.trim() === "");
+    const number = blank ? null : Number(value);
+    if (!blank && ((typeof value !== "string" && typeof value !== "number") || !Number.isFinite(number) || number < 0)) {
+      throw new Error(`${label}需为不小于 0 的数字`);
+    }
+    fields[key] = number;
+  }
+  if (symbol.endsWith(".PERP")) {
+    const side = raw.side ?? "long";
+    const leverage = raw.leverage == null ? 1 : Number(raw.leverage);
+    if (!["long", "short"].includes(side)) throw new Error("请选择做多或做空");
+    if (!Number.isSafeInteger(leverage) || leverage < 1 || (raw.leverage != null && !["string", "number"].includes(typeof raw.leverage))) {
+      throw new Error("杠杆倍数需为不小于 1 的整数");
+    }
+    fields.side = side;
+    fields.leverage = leverage;
+  }
+  return fields;
 }
 
-// 相对持仓成本的盈亏比例（%）
-function calcPl(q, cost) {
-  const lp = Number(q.last_price);
-  const c = Number(cost);
-  if (!Number.isFinite(lp) || !Number.isFinite(c) || c === 0) return null;
-  return (lp - c) / c * 100;
+function quantityUnit(symbol) {
+  if (!isCryptoSymbol(symbol)) return "股";
+  return symbol.replace(/\.PERP$/, "").replace(/USDT$/, "");
+}
+
+function positionCurrency(symbol) {
+  const market = marketOf(symbol);
+  return market === "cn" ? "CNY" : market === "hk" ? "HKD" : market === "us" ? "USD" : "USDT";
+}
+
+function formatAmount(value) {
+  const number = Number(value.toFixed(2));
+  return (number > 0 ? "+" : "") + number.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderPositionInputs() {
+  const raw = $("#symbol-input").value.trim();
+  const stock = normalizeSymbol(raw);
+  const futures = !stock && (selectedMarket() === "crypto" || !!normalizeBinanceSymbol(raw));
+  $("#contract-fields").classList.toggle("hidden", !futures);
+  $("#side-input").disabled = !futures;
+  $("#leverage-input").disabled = !futures;
+  const symbol = stock || normalizeBinanceSymbol(raw);
+  $("#quantity-label").textContent = symbol ? `数量（${quantityUnit(symbol)}）` : futures ? "数量（标的单位）" : "数量（股）";
+  $("#quantity-input").title = futures ? "实际持仓数量，不是保证金或 USDT 金额" : "实际持仓股数";
 }
 
 // ==================== 渲染 ====================
@@ -229,7 +269,8 @@ function renderMarketTurnover() {
   const diff = data && Number.isFinite(data.comparisonAmount) && Number.isFinite(data.previousAmount)
     ? data.comparisonAmount - data.previousAmount : null;
   const time = data && data.date && data.time ? `${data.date.slice(5)} ${data.time}` : "";
-  const status = !state.enabled ? "已暂停" : state.turnoverRefreshError || data && data.error ? "更新失败" : !data ? "获取中" : "";
+  const status = !state.enabled ? "已暂停" : state.turnoverRefreshError || data && data.error ? "更新失败"
+    : state.status.cnClosed ? "已休市" : !data ? "获取中" : "";
   const comparisonTime = [data && data.comparisonTime, data && data.comparisonError ? "更新失败" : ""].filter(Boolean).join(" · ") || "暂无同期数据";
   const comparisonTitle = data && data.previousDate && data.comparisonTime
     ? `与 ${data.previousDate} ${data.comparisonTime} 的累计成交额比较` : "与上一交易日同一时刻的累计成交额比较";
@@ -326,24 +367,38 @@ async function onFooterOptionChange(symbol) {
 }
 
 // 构建单个自选股行（分组渲染时复用）
+function buildPositionEditor(item) {
+  const input = (field, label, mode = "decimal") => `<label class="position-field">${escapeHtml(label)}<input class="position-input" data-field="${field}" type="text" inputmode="${mode}" autocomplete="off" spellcheck="false" value="${escapeHtml(editDraft[field] ?? "")}" placeholder="可选"></label>`;
+  return `<div class="position-editor">
+    <div class="position-fields">${input("cost", "成本价")}${input("quantity", `数量（${quantityUnit(item.symbol)}）`)}</div>
+    ${item.symbol.endsWith(".PERP") ? `<div class="position-fields">
+      <label class="position-field">方向<select class="position-input" data-field="side"><option value="long"${editDraft.side === "long" ? " selected" : ""}>做多</option><option value="short"${editDraft.side === "short" ? " selected" : ""}>做空</option></select></label>
+      ${input("leverage", "杠杆倍数", "numeric")}</div>` : ""}
+    <div class="position-actions"><button type="button" class="position-save">保存</button><button type="button" class="position-cancel">取消</button></div>
+  </div>`;
+}
+
 function buildRowHtml(item) {
   const q = state.quotes[item.symbol];
   const pct = q ? changePct(q) : null;
   const cost = item.cost != null ? Number(item.cost) : null;
-  const pl = (cost != null && q) ? calcPl(q, cost) : null;
+  const pl = calcPositionPl(item, q);
+  const futures = item.symbol.endsWith(".PERP");
   const editing = state.editingSymbol === item.symbol;
 
   const daySub = `<div class="change ${changeClass(pct)}"${isCryptoSymbol(item.symbol) ? ' title="24小时涨跌幅"' : ""}>${pct == null ? "—" : formatPct(pct)}</div>`;
   const plSub = pl != null
-    ? `<div class="change ${changeClass(pl)}">成本 ${formatPct(pl)}</div>`
+    ? `<div class="change ${changeClass(pl.percent)}" title="${futures ? "按开仓成本和杠杆估算的保证金收益率" : "相对成本价的收益率"}，未计手续费及资金费">${futures ? "收益率" : "成本"} ${formatPct(pl.percent)}</div>
+       ${pl.amount == null ? "" : `<div class="change ${changeClass(pl.amount)}" title="未计手续费及资金费">盈亏 ${formatAmount(pl.amount)} ${positionCurrency(item.symbol)}</div>`}`
     : "";
 
-  // 成本显示：编辑态为输入框 + 保存/取消按钮，否则为文字
-  const symbolHtml = editing
-    ? `${escapeHtml(item.symbol)} <input class="cost-edit" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="${escapeHtml(editDraft)}" placeholder="成本" data-symbol="${escapeHtml(item.symbol)}"><button class="cost-save" data-symbol="${escapeHtml(item.symbol)}">保存</button><button class="cost-cancel" data-symbol="${escapeHtml(item.symbol)}">取消</button>`
-    : `${escapeHtml(item.symbol)}${isCryptoSymbol(item.symbol) && !item.symbol.endsWith(".PERP") ? " · 现货" : ""}${cost != null ? ` · 成本 ${formatPrice(cost, item.symbol)}` : ""}`;
+  const symbolHtml = `${escapeHtml(item.symbol)}${isCryptoSymbol(item.symbol) && !futures ? " · 现货" : ""}`;
+  const details = [
+    cost != null ? `成本 ${formatPrice(cost, item.symbol)}` : "",
+    item.quantity != null ? `数量 ${Number(item.quantity).toLocaleString("en-US", { maximumFractionDigits: 10 })} ${quantityUnit(item.symbol)}` : "",
+    futures ? `${item.side === "short" ? "做空" : "做多"} · ${item.leverage ?? 1}x` : "",
+  ].filter(Boolean).join(" · ");
 
-  // 盈利提示开关：仅设有成本的股票显示（提示依赖成本计算盈亏），默认关闭
   const alertSwitch = (!editing && cost != null)
     ? `<span class="alert-toggle">
          <label class="mini-switch" title="盈利提示开关">
@@ -357,19 +412,27 @@ function buildRowHtml(item) {
   return `
     <div class="row-main">
       <div class="name"><span class="name-text">${escapeHtml(displayName(item, q))}</span>${sessionBadge(q)}</div>
-      <div class="symbol">${symbolHtml}${alertSwitch}</div>
+      <div class="symbol">${symbolHtml}</div>
+      ${details ? `<div class="position-details">${escapeHtml(details)}</div>` : ""}
+      ${alertSwitch}
     </div>
     <div class="row-quote">
       <div class="price">${q ? formatPrice(q.last_price, item.symbol) : "—"}</div>
       ${daySub}
       ${plSub}
     </div>
-    <button class="edit" data-symbol="${escapeHtml(item.symbol)}" title="编辑成本">✎</button>
+    ${editing ? buildPositionEditor(item) : ""}
+    <button class="edit" data-symbol="${escapeHtml(item.symbol)}" title="编辑持仓" aria-label="编辑 ${escapeHtml(item.symbol)} 持仓">✎</button>
     <button class="remove" data-symbol="${escapeHtml(item.symbol)}" title="移除">×</button>
   `;
 }
 
 function render() {
+  const focused = document.activeElement;
+  if (focused && focused.classList.contains("position-input")) {
+    editField = focused.dataset.field;
+    editSelection = { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection };
+  }
   renderIndices();
   const list = $("#watchlist");
   const empty = $("#empty");
@@ -405,14 +468,16 @@ function render() {
     }
   }
 
-  // 编辑态：render 重建了整列表 DOM，会移除聚焦中的输入框。这里重新聚焦并恢复光标，
-  // 这样行情刷新不会打断正在进行的编辑。
   if (state.editingSymbol) {
-    const input = $("#watchlist .cost-edit");
+    const input = $(`#watchlist .position-input[data-field="${editField}"]`);
     if (input) {
+      const selection = editSelection;
       input.focus();
-      const pos = editCaret != null ? Math.min(editCaret, input.value.length) : input.value.length;
-      try { input.setSelectionRange(pos, pos); } catch (err) { /* ignore */ }
+      if (input.tagName === "INPUT") {
+        const start = selection?.start ?? input.value.length;
+        const end = selection?.end ?? start;
+        input.setSelectionRange(start, end, selection?.direction ?? "none");
+      }
     }
   }
 
@@ -422,8 +487,9 @@ function render() {
 
 function needsApiKey() {
   if (!state.enabled || state.source !== "tickflow" || state.apiKey) return false;
-  return state.watchlist.some((w) => !isCryptoSymbol(w.symbol)) ||
-    activeFooterItems(state.tradingMarkets, state.footerSymbols).some((item) => item.market !== "crypto" && item.market !== "hk");
+  const active = (symbol) => !isCnSymbol(symbol) || isCnPollingTime();
+  return state.watchlist.some((w) => !isCryptoSymbol(w.symbol) && active(w.symbol)) ||
+    activeFooterItems(state.tradingMarkets, state.footerSymbols).some((item) => item.market !== "crypto" && item.market !== "hk" && active(item.symbol));
 }
 
 function renderStatus() {
@@ -432,6 +498,8 @@ function renderStatus() {
   let mode, text;
   if (state.enabled === false) {
     mode = "idle"; text = "已暂停";
+  } else if (state.reconnecting) {
+    mode = "idle"; text = "重连中";
   } else if (needsApiKey()) {
     mode = "idle"; text = "需要 API Key";
   } else {
@@ -439,7 +507,30 @@ function renderStatus() {
     text = state.status.text || "未连接";
   }
   el.className = "status status--" + mode;
+  el.title = state.enabled ? `${text} · 点击重连` : "已暂停";
   txt.textContent = text;
+  const button = $("#btn-reconnect");
+  button.disabled = !state.enabled || state.reconnecting;
+  button.classList.toggle("is-reconnecting", state.reconnecting);
+  button.setAttribute("aria-busy", String(state.reconnecting));
+  button.title = !state.enabled ? "已暂停" : state.reconnecting ? "重连中" : "重新连接行情";
+}
+
+async function reconnectQuotes() {
+  if (!state.enabled || state.reconnecting) return;
+  if (needsApiKey()) { $("#settings").classList.remove("hidden"); return; }
+  state.reconnecting = true;
+  renderStatus();
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "reconnect-quotes" });
+    if (!result || !result.ok) showError("重连失败，请重试");
+    else showError("");
+  } catch (e) {
+    showError("重连失败，请重试");
+  } finally {
+    state.reconnecting = false;
+    renderStatus();
+  }
 }
 
 function showError(msg) {
@@ -540,7 +631,8 @@ function renderMarketUI() {
     ? state.tradingMarkets.map((m) => examples[m].split(" / ")[0]).join(" / ")
     : examples[market];
   $("#symbol-input").placeholder = `代码或名称，如 ${example}`;
-  $("#empty .hint").textContent = `在下方输入代码或名称添加，例如 ${example}`;
+  $("#empty .hint").textContent = `点击「添加自选」输入代码或名称，例如 ${example}`;
+  renderPositionInputs();
 }
 
 function guessMarkets(query) {
@@ -665,16 +757,20 @@ async function loadBinanceSymbols() {
   if (binanceSymbols) return binanceSymbols;
   if (binanceSymbolsPromise) return binanceSymbolsPromise;
   binanceSymbolsPromise = (async () => {
-    const resp = await fetchWithTimeout(`${BINANCE_BASE}/fapi/v1/exchangeInfo`, {}, 10000);
-    if (!resp.ok) throw new Error("load failed");
+    const resp = await fetch(`${BINANCE_BASE}/fapi/v1/exchangeInfo`, {
+      cache: "no-store", signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
-    if (!Array.isArray(data.symbols)) throw new Error("invalid instruments");
+    if (!data || !Array.isArray(data.symbols)) throw new Error("数据无效");
     // 暂停交易的合约仍提供行情，不能按已下架过滤。
-    binanceSymbols = data.symbols
+    const symbols = data.symbols
       .filter((x) => x && ["TRADING", "TRADING_HALT"].includes(x.status) && ["PERPETUAL", "TRADIFI_PERPETUAL"].includes(x.contractType) && x.quoteAsset === "USDT")
       .map((x) => normalizeBinanceSymbol(x.symbol))
       .filter(Boolean)
       .sort();
+    if (!symbols.length) throw new Error("列表为空");
+    binanceSymbols = symbols;
     return binanceSymbols;
   })();
   try {
@@ -685,20 +781,30 @@ async function loadBinanceSymbols() {
 }
 
 async function searchBinance(q) {
-  try {
-    const list = await loadBinanceSymbols();
-    const query = q.trim().toLowerCase().replace(/\.perp$/, "");
-    const results = [];
-    for (const s of list) {
-      if (s.slice(0, -5).toLowerCase().includes(query)) {
-        results.push({ symbol: s, name: `${s.slice(0, -5)} 永续` });
-        if (results.length >= 20) break;
-      }
+  const list = await loadBinanceSymbols();
+  const query = q.trim().toLowerCase().replace(/\.perp$/, "");
+  const results = [];
+  for (const s of list) {
+    if (s.slice(0, -5).toLowerCase().includes(query)) {
+      results.push({ symbol: s, name: `${s.slice(0, -5)} 永续` });
+      if (results.length >= 20) break;
     }
-    return results;
-  } catch (e) {
-    return [];
   }
+  return results;
+}
+
+function binanceCatalogError(error) {
+  const reason = error && ["AbortError", "TimeoutError"].includes(error.name) ? "请求超时"
+    : error instanceof SyntaxError ? "数据无效"
+    : error && /^(HTTP \d{3}|数据无效|列表为空)$/.test(error.message) ? error.message
+    : "网络或证书错误";
+  return `合约列表获取失败：${reason}`;
+}
+
+function renderSearchStatus(message = "", retry = false) {
+  $("#search-status").classList.toggle("hidden", !message);
+  $("#search-status-text").textContent = message;
+  $("#btn-retry-search").classList.toggle("hidden", !retry);
 }
 
 function filterByMarket(results, market) {
@@ -714,6 +820,7 @@ function clearSearch() {
   searchTimer = null;
   searchSeq++;
   renderSearchResults([]);
+  renderSearchStatus();
 }
 
 async function searchInstruments(query) {
@@ -721,7 +828,8 @@ async function searchInstruments(query) {
   const q = query.trim().toLowerCase();
   const market = selectedMarket();
   renderSearchResults([]);
-  if (!q || normalizeSymbol(q)) return;
+  renderSearchStatus();
+  if (!$("#add-panel").open || !q || normalizeSymbol(q)) return;
   const results = [];
   let cryptoResults = [];
   const updateResults = () => {
@@ -730,10 +838,17 @@ async function searchInstruments(query) {
     const stocks = filterByMarket(results, market).slice(0, stockLimit);
     renderSearchResults([...cryptoResults.slice(0, 20 - stocks.length), ...stocks]);
   };
-  const cryptoSearch = state.tradingMarkets.includes("crypto") && (market === "crypto" || market === "auto")
+  const searchCrypto = state.tradingMarkets.includes("crypto") && (market === "crypto" || market === "auto");
+  if (searchCrypto) renderSearchStatus("合约搜索中…");
+  const cryptoSearch = searchCrypto
     ? searchBinance(q).then((items) => {
+      if (seq !== searchSeq) return;
       cryptoResults = items;
+      renderSearchStatus(!items.length && (market === "crypto" || normalizeBinanceSymbol(q))
+        ? "未找到匹配的 USDT 永续合约" : "");
       updateResults();
+    }).catch((error) => {
+      if (seq === searchSeq) renderSearchStatus(binanceCatalogError(error), true);
     }) : Promise.resolve();
   if (market === "crypto" || normalizeBinanceSymbol(q)) {
     await cryptoSearch;
@@ -781,7 +896,7 @@ function renderSearchResults(results) {
 }
 
 // ==================== 自选股管理 ====================
-async function addSymbol(raw, costRaw) {
+async function addSymbol(raw, positionRaw) {
   let symbol;
   const market = selectedMarket();
   const asCrypto = !normalizeSymbol(raw) && (market === "crypto" || normalizeBinanceSymbol(raw));
@@ -797,12 +912,19 @@ async function addSymbol(raw, costRaw) {
     showError(`未开启${label}市场`);
     return false;
   }
+  let position;
+  try {
+    position = parsePositionFields(positionRaw, symbol);
+  } catch (e) {
+    showError(e.message);
+    return false;
+  }
   if (asCrypto) {
     try {
       const list = await loadBinanceSymbols();
       if (!list.includes(symbol)) { showError("未找到 USDT 永续合约"); return false; }
     } catch (e) {
-      showError("合约列表获取失败，请稍后重试");
+      showError(binanceCatalogError(e));
       return false;
     }
     if (!isMarketAllowed(symbol)) { showError("未开启币安市场"); return false; }
@@ -811,9 +933,8 @@ async function addSymbol(raw, costRaw) {
     showError("该代码已在自选股中");
     return false;
   }
-  const cost = parseCost(costRaw);
   const name = asCrypto ? `${symbol.slice(0, -5)} 永续` : null;
-  state.watchlist.push({ symbol, name, cost, alert: false });
+  state.watchlist.push({ symbol, name, ...position, alert: false });
   if (!(await saveWatchlist())) return false;
   showError("");
   render();
@@ -829,38 +950,48 @@ async function removeSymbol(symbol) {
   ensureBackground();
 }
 
-function commitCost(input) {
-  const symbol = input.dataset.symbol;
-  const item = state.watchlist.find((w) => w.symbol === symbol);
-  if (item) {
-    item.cost = parseCost(input.value);
-    saveWatchlist();
+async function commitPosition() {
+  const revision = editRevision;
+  const item = state.watchlist.find((w) => w.symbol === state.editingSymbol);
+  if (!item) { cancelEdit(); return; }
+  let position;
+  try {
+    position = parsePositionFields(editDraft, item.symbol);
+  } catch (e) {
+    showError(e.message);
+    return;
   }
+  Object.assign(item, position);
+  if (!(await saveWatchlist()) || revision !== editRevision) return;
+  showError("");
   cancelEdit();
 }
 
 function cancelEdit() {
   state.editingSymbol = null;
-  editDraft = "";
-  editCaret = null;
+  editDraft = {};
+  editField = "cost";
+  editSelection = null;
+  editRevision++;
   render();
 }
 
 // ==================== 自选股导入导出 ====================
-// 导出为 JSON 文件（含名称、成本价、盈利提示开关），换设备后可一键导入恢复
 function exportWatchlist() {
   if (state.watchlist.length === 0) {
     showError("自选股为空，无需导出");
     return;
   }
   const payload = {
-    version: 1,
+    version: 2,
     type: "watchlist",
     exportedAt: new Date().toISOString(),
     watchlist: state.watchlist.map((w) => ({
       symbol: w.symbol,
       name: w.name || "",
       cost: w.cost ?? null,
+      quantity: w.quantity ?? null,
+      ...(w.symbol.endsWith(".PERP") ? { side: w.side ?? "long", leverage: w.leverage ?? 1 } : {}),
       alert: w.alert === true,
     })),
   };
@@ -908,10 +1039,17 @@ async function importWatchlist(file) {
     if (!symbol) { skipped++; continue; }
     if (!isMarketAllowed(symbol)) { excluded++; continue; }
     if (state.watchlist.some((w) => w.symbol === symbol)) { skipped++; continue; }
+    let position;
+    try {
+      position = parsePositionFields(raw, symbol);
+    } catch (e) {
+      skipped++;
+      continue;
+    }
     state.watchlist.push({
       symbol,
       name: (typeof raw.name === "string" && raw.name.trim()) ? raw.name.trim() : null,
-      cost: parseCost(raw.cost),
+      ...position,
       alert: raw.alert === true,
     });
     added++;
@@ -1082,7 +1220,21 @@ function bindEvents() {
     $("#settings").classList.toggle("hidden");
   });
 
+  $("#add-panel").addEventListener("toggle", () => {
+    clearSearch();
+    if ($("#add-panel").open) {
+      $("#symbol-input").focus();
+      searchInstruments($("#symbol-input").value);
+    }
+  });
+
   $("#btn-save-key").addEventListener("click", onSaveKey);
+  $("#btn-reconnect").addEventListener("click", reconnectQuotes);
+  $("#btn-retry-search").addEventListener("click", () => {
+    clearSearch();
+    showError("");
+    searchInstruments($("#symbol-input").value);
+  });
 
   $("#market-turnover").addEventListener("click", (e) => {
     if (e.target.closest(".turnover-refresh")) refreshMarketTurnover();
@@ -1151,11 +1303,15 @@ function bindEvents() {
 
   $("#add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const ok = await addSymbol($("#symbol-input").value, $("#cost-input").value);
-    // 添加失败时保留输入，方便修改后重试
+    const values = {};
+    for (const field of ["cost", "quantity", "side", "leverage"]) {
+      const input = $(`#${field}-input`);
+      values[field] = input.validity.badInput ? NaN : input.value;
+    }
+    const ok = await addSymbol($("#symbol-input").value, values);
     if (ok) {
-      $("#symbol-input").value = "";
-      $("#cost-input").value = "";
+      $("#add-form").reset();
+      renderPositionInputs();
       clearSearch();
     }
   });
@@ -1163,6 +1319,7 @@ function bindEvents() {
   // 输入时按名称/代码搜索
   $("#symbol-input").addEventListener("input", (e) => {
     const val = e.target.value.trim();
+    renderPositionInputs();
     clearSearch();
     if (!val || normalizeSymbol(val)) return;
     searchTimer = setTimeout(() => searchInstruments(val), 300);
@@ -1172,6 +1329,7 @@ function bindEvents() {
     const item = e.target.closest(".search-item");
     if (!item || !isMarketAllowed(item.dataset.symbol)) return;
     $("#symbol-input").value = item.dataset.symbol;
+    renderPositionInputs();
     clearSearch();
   });
 
@@ -1188,20 +1346,21 @@ function bindEvents() {
     if (editBtn) {
       const item = state.watchlist.find((w) => w.symbol === editBtn.dataset.symbol);
       state.editingSymbol = editBtn.dataset.symbol;
-      editDraft = (item && item.cost != null) ? String(item.cost) : "";
-      editCaret = null;
+      editDraft = { cost: item.cost ?? "", quantity: item.quantity ?? "", side: item.side ?? "long", leverage: item.leverage ?? 1 };
+      editField = "cost";
+      editSelection = null;
+      editRevision++;
       render();
-      const input = document.querySelector(".cost-edit");
+      const input = document.querySelector('.position-input[data-field="cost"]');
       if (input) { input.focus(); input.select(); }
       return;
     }
-    const saveBtn = e.target.closest(".cost-save");
+    const saveBtn = e.target.closest(".position-save");
     if (saveBtn) {
-      const input = document.querySelector(".cost-edit");
-      if (input) commitCost(input);
+      commitPosition();
       return;
     }
-    const cancelBtn = e.target.closest(".cost-cancel");
+    const cancelBtn = e.target.closest(".position-cancel");
     if (cancelBtn) { cancelEdit(); return; }
     const removeBtn = e.target.closest(".remove");
     if (removeBtn) removeSymbol(removeBtn.dataset.symbol);
@@ -1216,37 +1375,31 @@ function bindEvents() {
     saveWatchlist();
   });
 
-  // 成本编辑：回车保存、Esc 取消；退出编辑仅靠保存/取消按钮或回车/Esc
   $("#watchlist").addEventListener("keydown", (e) => {
-    if (!e.target.classList.contains("cost-edit")) return;
-    if (e.key === "Enter") { e.preventDefault(); commitCost(e.target); }
+    if (!e.target.classList.contains("position-input")) return;
+    if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); commitPosition(); }
     else if (e.key === "Escape") { cancelEdit(); }
   });
 
-  // 输入时同步草稿与光标位置，供 render 重建输入框时恢复
   $("#watchlist").addEventListener("input", (e) => {
-    if (e.target.classList.contains("cost-edit")) {
-      editDraft = e.target.value;
-      editCaret = e.target.selectionStart;
+    if (e.target.classList.contains("position-input")) {
+      editDraft[e.target.dataset.field] = e.target.value;
+      editRevision++;
+      editField = e.target.dataset.field;
+      editSelection = { start: e.target.selectionStart, end: e.target.selectionEnd, direction: e.target.selectionDirection };
     }
   });
 
-  // 仅移动光标（未输入）时也同步，避免刷新后光标被重置
-  ["keyup", "mouseup", "focus"].forEach((type) => {
+  ["keyup", "mouseup", "focusin"].forEach((type) => {
     $("#watchlist").addEventListener(type, (e) => {
-      if (e.target.classList.contains("cost-edit")) {
-        editCaret = e.target.selectionStart;
+      if (e.target.classList.contains("position-input")) {
+        editField = e.target.dataset.field;
+        editSelection = { start: e.target.selectionStart, end: e.target.selectionEnd, direction: e.target.selectionDirection };
       }
     });
   });
 
-  $("#status").addEventListener("click", () => {
-    if (needsApiKey()) {
-      $("#settings").classList.remove("hidden");
-    } else {
-      ensureBackground();
-    }
-  });
+  $("#status").addEventListener("click", reconnectQuotes);
 }
 
 // ==================== 初始化 ====================

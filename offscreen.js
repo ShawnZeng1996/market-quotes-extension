@@ -24,7 +24,12 @@ let tradingMarkets = normalizeTradingMarkets();
 let footerSymbols = normalizeFooterSymbols();
 let generation = 0;
 let stockGeneration = 0;
+let configSequence = 0;
+let cnSessionOpen = isCnPollingTime();
+let cnSessionTimer = null;
 let futuresTimer = null;
+let futuresPendingRun = null;
+let futuresPendingTask = null;
 let hkIndexTimer = null;
 let turnoverTimer = null;
 let turnoverPendingRun = null;
@@ -44,6 +49,7 @@ let cryptoStatus = null;      // { ok, text }，null 表示币安通道未启用
 let lastStatusKey = "";
 let stopped = true;
 let quotesCache = {};         // symbol -> quote（内存常驻，合并更新）
+const stockQuoteSources = new Map();
 let writeTimer = null;
 let lastPlState = {};         // symbol -> 'profit' | 'loss'（扭亏为盈检测基线）
 
@@ -58,6 +64,9 @@ function footerItems() { return activeFooterItems(tradingMarkets, footerSymbols)
 function stockAllSymbols() {
   const indices = footerItems().filter((item) => item.market !== "crypto" && (source === "tencent" || item.market !== "hk"));
   return [...new Set([...stockSymbols(), ...indices.map((item) => item.symbol)])];
+}
+function activeStockSymbols() {
+  return stockAllSymbols().filter((symbol) => !isCnSymbol(symbol) || isCnPollingTime());
 }
 function hkIndexSymbols() {
   return source === "tencent" ? [] : footerItems().filter((item) => item.market === "hk").map((item) => item.symbol);
@@ -105,19 +114,21 @@ function emitStatus() {
   } else if (futuresStatus) {
     mode = "poll";
     text = futuresStatus.text;
-  } else if (turnoverStatus) {
+  } else if (turnoverStatus && cnSessionOpen) {
     mode = "poll";
     text = turnoverStatus.text;
-  } else if (!allSymbols().length && enabled) {
+  } else if (!allSymbols().length && enabled && !tradingMarkets.includes("cn")) {
     text = "暂无关注行情";
   }
   if (hkIndexStatus && !hkIndexStatus.ok && (stockStatus || cryptoStatus)) text += " · 港股指数异常";
-  if (futuresStatus && !futuresStatus.ok && (stockStatus || cryptoStatus || hkIndexStatus)) text += " · 合约异常";
-  if (turnoverStatus && !turnoverStatus.ok && (stockStatus || cryptoStatus || hkIndexStatus || futuresStatus)) text += " · 成交额异常";
-  const key = mode + "|" + text;
+  if (futuresStatus && !futuresStatus.ok && (stockStatus || cryptoStatus || hkIndexStatus)) text += " · " + futuresStatus.text;
+  if (turnoverStatus && !turnoverStatus.ok && cnSessionOpen && (stockStatus || cryptoStatus || hkIndexStatus || futuresStatus)) text += " · 成交额异常";
+  const cnClosed = enabled && !cnSessionOpen && (tradingMarkets.includes("cn") || stockSymbols().some(isCnSymbol));
+  if (cnClosed) text = mode === "idle" ? "A股已休市" : text + " · A股已休市";
+  const key = mode + "|" + text + "|" + cnClosed;
   if (key === lastStatusKey) return;
   lastStatusKey = key;
-  send({ type: "status", mode, text });
+  send({ type: "status", mode, text, cnClosed });
 }
 
 function setStockStatus(m, text) {
@@ -136,7 +147,11 @@ function pruneQuotes() {
   const keep = new Set(allSymbols());
   let removed = false;
   for (const s of Object.keys(quotesCache)) {
-    if (!keep.has(s)) { delete quotesCache[s]; removed = true; }
+    if (!keep.has(s)) {
+      delete quotesCache[s];
+      stockQuoteSources.delete(s);
+      removed = true;
+    }
   }
   return removed;
 }
@@ -161,11 +176,13 @@ function stopAll() {
   if (futuresTimer) { clearInterval(futuresTimer); futuresTimer = null; }
   if (hkIndexTimer) { clearInterval(hkIndexTimer); hkIndexTimer = null; }
   if (turnoverTimer) { clearInterval(turnoverTimer); turnoverTimer = null; }
+  if (cnSessionTimer) { clearTimeout(cnSessionTimer); cnSessionTimer = null; }
 }
 
 function start() {
   stopAll();
   stopped = false;
+  cnSessionOpen = isCnPollingTime();
   stockMode = "idle";
   stockStatus = null;
   cryptoStatus = null;
@@ -179,11 +196,31 @@ function start() {
   startFutures();
   startHkIndices();
   startMarketTurnover();
+  scheduleCnSession();
   emitStatus();
 }
 
+function scheduleCnSession() {
+  if (stopped || !enabled || !(tradingMarkets.includes("cn") || stockSymbols().some(isCnSymbol))) return;
+  cnSessionTimer = setTimeout(() => {
+    cnSessionTimer = null;
+    const open = isCnPollingTime();
+    if (open !== cnSessionOpen) {
+      cnSessionOpen = open;
+      stopStocks();
+      stockStatus = null;
+      startStocks();
+      if (turnoverTimer) { clearInterval(turnoverTimer); turnoverTimer = null; }
+      turnoverStatus = null;
+      startMarketTurnover();
+      emitStatus();
+    }
+    scheduleCnSession();
+  }, nextCnSessionDelay());
+}
+
 function startStocks() {
-  if (!stockAllSymbols().length) return;
+  if (!activeStockSymbols().length) return;
   if (source === "tencent") startTencent();
   else startTickflow();
 }
@@ -211,7 +248,7 @@ function startHkIndices() {
 }
 
 function startMarketTurnover() {
-  if (!tradingMarkets.includes("cn")) return;
+  if (!tradingMarkets.includes("cn") || !isCnPollingTime()) return;
   turnoverStatus = { ok: true, text: "A股成交额 · 获取中" };
   pollMarketTurnoverOnce();
   turnoverTimer = setInterval(pollMarketTurnoverOnce, POLL_INTERVAL);
@@ -233,6 +270,7 @@ function startTencent() {
 }
 
 function connectWS() {
+  if (stopped || !enabled || !activeStockSymbols().length) return;
   if (wsRetryTimer) { clearTimeout(wsRetryTimer); wsRetryTimer = null; }
   if (stockMode !== "poll") setStockStatus("ws", "连接中…");
   const socket = new WebSocket(`${WS_URL}?api_key=${encodeURIComponent(apiKey)}`);
@@ -246,7 +284,7 @@ function connectWS() {
     socket.send(JSON.stringify({
       op: "subscribe",
       channel: "quotes",
-      symbols: stockAllSymbols(),
+      symbols: activeStockSymbols(),
     }));
     pollOnce(); // 立即拉一次快照，开盘间隙也能先有数据
   };
@@ -255,8 +293,10 @@ function connectWS() {
     if (ws !== socket) return;
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
-    if (msg.op === "quotes") handleQuotes(msg.data);
-    else if (msg.op === "error") switchToPolling(false); // 服务端明确拒绝（如非 Expert 档），不再重连
+    if (msg.op === "quotes" && Array.isArray(msg.data)) {
+      const active = new Set(activeStockSymbols());
+      handleQuotes(msg.data.filter((q) => q && active.has(q.symbol)));
+    } else if (msg.op === "error") switchToPolling(false); // 服务端明确拒绝（如非 Expert 档），不再重连
   };
 
   const onDrop = () => {
@@ -269,6 +309,7 @@ function connectWS() {
 
 // 降级为 REST 轮询；retry 时按退避间隔尝试恢复 WS
 function switchToPolling(retry) {
+  if (!activeStockSymbols().length) { stopStocks(); stockStatus = null; emitStatus(); return; }
   if (ws) {
     const old = ws;
     ws = null;
@@ -289,12 +330,13 @@ function switchToPolling(retry) {
 }
 
 async function pollOnce() {
-  if (!apiKey || stopped || !stockAllSymbols().length) return;
+  const syms = activeStockSymbols();
+  if (!apiKey || stopped || !enabled || !syms.length) return;
   const run = generation;
   const stockRun = stockGeneration;
   try {
     const resp = await fetch(
-      `${REST_URL}?symbols=${encodeURIComponent(stockAllSymbols().join(","))}`,
+      `${REST_URL}?symbols=${encodeURIComponent(syms.join(","))}`,
       { headers: { "x-api-key": apiKey }, signal: AbortSignal.timeout(10000) }
     );
     if (run !== generation || stockRun !== stockGeneration || stopped) return;
@@ -302,6 +344,8 @@ async function pollOnce() {
       if (resp.status === 401 || resp.status === 403) {
         stopStocks();
         setStockStatus("idle", "API Key 无效");
+      } else {
+        setStockStatus(stockMode, `行情获取失败（HTTP ${resp.status}）`);
       }
       return;
     }
@@ -387,16 +431,18 @@ async function fetchTencentQuotes(syms) {
 }
 
 async function pollTencentOnce() {
-  if (stopped || source !== "tencent" || !stockAllSymbols().length) return;
+  const syms = activeStockSymbols();
+  if (stopped || !enabled || source !== "tencent" || !syms.length) return;
   const run = generation;
+  const stockRun = stockGeneration;
   try {
-    const quotes = await fetchTencentQuotes(stockAllSymbols());
-    if (run !== generation || stopped) return;
+    const quotes = await fetchTencentQuotes(syms);
+    if (run !== generation || stockRun !== stockGeneration || stopped) return;
     if (!quotes.length) { setStockStatus("poll", "腾讯行情 · 无数据"); return; }
     handleQuotes(quotes);
     setStockStatus("poll", "腾讯行情 · 轮询中");
   } catch (e) {
-    if (run !== generation || stopped) return;
+    if (run !== generation || stockRun !== stockGeneration || stopped) return;
     setStockStatus("poll", "腾讯行情 · 获取失败");
   }
 }
@@ -479,8 +525,8 @@ function publishMarketTurnover(data) {
   send({ type: "market-turnover", data });
 }
 
-function pollMarketTurnoverOnce() {
-  if (stopped || !enabled || !tradingMarkets.includes("cn")) return Promise.resolve({ ok: false });
+function pollMarketTurnoverOnce(manual = false) {
+  if (stopped || !enabled || !tradingMarkets.includes("cn") || !manual && !isCnPollingTime()) return Promise.resolve({ ok: false });
   if (turnoverPendingRun === generation) return turnoverPendingTask;
   const run = generation;
   turnoverPendingRun = run;
@@ -561,33 +607,56 @@ async function pollBinanceOnce() {
   }
 }
 
-async function pollFuturesOnce() {
+function pollFuturesOnce() {
   const items = futuresItems();
-  if (stopped || !items.length) return;
+  if (stopped || !enabled || !items.length) return Promise.resolve();
+  if (futuresPendingRun === generation) return futuresPendingTask;
   const run = generation;
-  const results = await Promise.allSettled(items.map(async (item) => {
-    const resp = await fetch(`${BINANCE_FUTURES_URL}?symbol=${encodeURIComponent(item.binanceSymbol)}`, {
-      cache: "no-store", signal: AbortSignal.timeout(10000),
-    });
-    if (!resp.ok) throw new Error("获取失败");
-    const t = await resp.json();
-    const price = Number(t.lastPrice);
-    const open = Number(t.openPrice);
-    if (t.symbol !== item.binanceSymbol || !Number.isFinite(price) || price <= 0 || !Number.isFinite(open) || open <= 0) throw new Error("无数据");
-    return {
-      symbol: item.symbol,
-      name: item.name,
-      last_price: price,
-      prev_close: open,
-      timestamp: Number(t.closeTime) || null,
-      region: "CRYPTO",
-    };
-  }));
-  if (run !== generation || stopped) return;
-  handleQuotes(results.filter((r) => r.status === "fulfilled").map((r) => r.value));
-  const ok = results.every((r) => r.status === "fulfilled");
-  futuresStatus = { ok, text: ok ? "币安合约 · 轮询中" : "币安合约 · 获取失败" };
-  emitStatus();
+  futuresPendingRun = run;
+  futuresPendingTask = fetchFutures(run, items);
+  return futuresPendingTask;
+}
+
+async function fetchFutures(run, items) {
+  try {
+    const results = await Promise.allSettled(items.map(async (item) => {
+      let resp;
+      try {
+        resp = await fetch(`${BINANCE_FUTURES_URL}?symbol=${encodeURIComponent(item.binanceSymbol)}`, {
+          credentials: "omit", cache: "no-store", signal: AbortSignal.timeout(10000),
+        });
+      } catch (e) {
+        const reason = ["TimeoutError", "AbortError"].includes(e.name) ? "请求超时" : "网络错误";
+        throw new Error(`${item.binanceSymbol} ${reason}`);
+      }
+      if (!resp.ok) throw new Error(`${item.binanceSymbol} HTTP ${resp.status}`);
+      const t = await resp.json().catch(() => null);
+      const price = Number(t && t.lastPrice);
+      const open = Number(t && t.openPrice);
+      const timestamp = Number(t && t.closeTime);
+      if (!t || t.symbol !== item.binanceSymbol || !Number.isFinite(price) || price <= 0) {
+        throw new Error(`${item.binanceSymbol} 数据无效`);
+      }
+      if (run !== generation || stopped) return;
+      handleQuotes([{
+        symbol: item.symbol,
+        name: item.name,
+        last_price: price,
+        prev_close: Number.isFinite(open) && open > 0 ? open : null,
+        timestamp: timestamp > 0 && Number.isFinite(new Date(timestamp).getTime()) ? timestamp : null,
+        region: "CRYPTO",
+      }]);
+    }));
+    if (run !== generation || stopped) return;
+    const failure = results.find((r) => r.status === "rejected");
+    futuresStatus = { ok: !failure, text: failure ? `币安合约 · ${failure.reason.message}` : "币安合约 · 轮询中" };
+    emitStatus();
+  } finally {
+    if (futuresPendingRun === run) {
+      futuresPendingRun = null;
+      futuresPendingTask = null;
+    }
+  }
 }
 
 // 扭亏为盈提示音（Web Audio 生成短促"嘀嘀"，无需音频文件）
@@ -615,19 +684,17 @@ function playBeep() {
   }
 }
 
-// 检测持仓「扭亏为盈」（盈亏比例由负转正），触发后由 SW 在工具栏图标上打角标
 function detectPlTurn(q) {
   const item = watchlist.find((w) => w.symbol === q.symbol);
-  if (!item || item.cost == null) return;
+  if (!item) return;
   if (item.alert !== true) {
-    delete lastPlState[q.symbol]; // 关闭提示的股票不跟踪，清基线避免重开时误报
+    delete lastPlState[q.symbol];
     return;
   }
-  const cost = Number(item.cost);
-  const lp = Number(q.last_price);
-  if (!Number.isFinite(cost) || !Number.isFinite(lp) || cost === 0) return;
+  const pl = calcPositionPl(item, q);
+  if (!pl) return;
 
-  const cur = lp >= cost ? "profit" : "loss";
+  const cur = pl.percent >= 0 ? "profit" : "loss";
   const prev = lastPlState[q.symbol];
   if (prev === undefined) {
     lastPlState[q.symbol] = cur; // 首次建立基线，不触发
@@ -644,10 +711,13 @@ function detectPlTurn(q) {
 // 返回 { accepted, changed }：changed 为 false 时无需上报，省掉无效的 storage 写入与弹窗重绘。
 function mergeQuote(q) {
   const existing = quotesCache[q.symbol];
-  if (existing && existing.timestamp && q.timestamp && q.timestamp < existing.timestamp) {
+  const stock = !isCryptoSymbol(q.symbol);
+  const sameSource = !stock || stockQuoteSources.get(q.symbol) === source;
+  if (sameSource && existing && existing.timestamp && q.timestamp && q.timestamp < existing.timestamp) {
     return { accepted: false, changed: false };
   }
   quotesCache[q.symbol] = q;
+  if (stock) stockQuoteSources.set(q.symbol, source);
   const changed = !existing ||
     existing.last_price !== q.last_price ||
     existing.prev_close !== q.prev_close ||
@@ -672,8 +742,8 @@ function handleQuotes(data) {
 
 const symbolKey = (list) => list.map((w) => w.symbol).sort().join(",");
 
-// 只有数据源 / Key / 开关 / 标的集合变化才重连；仅改成本、提示开关、名称时原地更新
 function applyConfig(cfg) {
+  configSequence++;
   const next = {
     source: (cfg && cfg.source) || "tencent",
     apiKey: (cfg && cfg.apiKey) || "",
@@ -691,13 +761,15 @@ function applyConfig(cfg) {
     symbolKey(next.watchlist) !== symbolKey(watchlist) ||
     symbolKey(nextFooter) !== symbolKey(footerItems());
 
-  // 成本或提示开关变了的标的重建扭亏基线，其余保留，避免误报 / 漏报
   const prev = new Map(watchlist.map((w) => [w.symbol, w]));
   const nextSyms = new Set(next.watchlist.map((w) => w.symbol));
   for (const s of Object.keys(lastPlState)) {
     const p = prev.get(s);
     const n = next.watchlist.find((w) => w.symbol === s);
-    if (!nextSyms.has(s) || !p || p.cost !== n.cost || p.alert !== n.alert) delete lastPlState[s];
+    if (!nextSyms.has(s) || !p ||
+        ["cost", "quantity", "side", "leverage", "alert"].some((field) => p[field] !== n[field])) {
+      delete lastPlState[s];
+    }
   }
 
   source = next.source;
@@ -706,8 +778,9 @@ function applyConfig(cfg) {
   tradingMarkets = next.tradingMarkets;
   footerSymbols = next.footerSymbols;
   watchlist = next.watchlist;
-  if (sourceChanged) { quotesCache = {}; scheduleWrite(); } // 切源清缓存，避免跨源时间戳格式混比
+  if (configSequence === 1) quotesCache = { ...(cfg && cfg.quotes), ...quotesCache };
   if (needRestart) start();
+  return needRestart;
 }
 
 // 接收 SW 下发的配置变化
@@ -715,18 +788,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "config-changed") applyConfig(msg);
   if (msg && msg.type === "refresh-turnover") {
     applyConfig(msg);
-    pollMarketTurnoverOnce().then(sendResponse);
+    pollMarketTurnoverOnce(true).then(sendResponse);
     return true;
+  }
+  if (msg && msg.type === "reconnect") {
+    const restarted = applyConfig(msg);
+    if (enabled && !restarted) start();
+    sendResponse({ ok: enabled });
   }
 });
 
 // 启动：向 SW 请求配置
 async function bootstrap() {
+  const sequence = configSequence;
   try {
-    applyConfig(await chrome.runtime.sendMessage({ type: "get-config" }));
+    const config = await chrome.runtime.sendMessage({ type: "get-config" });
+    if (sequence === configSequence) applyConfig(config);
   } catch (e) {
-    // SW 尚未就绪，稍后重试
-    setTimeout(bootstrap, 1000);
+    if (sequence === configSequence) setTimeout(bootstrap, 1000);
   }
 }
 

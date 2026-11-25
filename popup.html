@@ -17,7 +17,17 @@
         <span id="status" class="status status--idle" title="点击重连">
           <i class="dot"></i><span id="status-text">未连接</span>
         </span>
-        <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+        <button type="button" id="btn-reconnect" class="icon-btn reconnect-btn" title="重新连接行情" aria-label="重新连接行情" aria-busy="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16M8 16H3v5"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-settings" class="icon-btn" title="设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M9.6 2h4.8l.6 2.5 2 1.2 2.5-.7 2.4 4.2L20 11v2l1.9 1.8-2.4 4.2-2.5-.7-2 1.2-.6 2.5H9.6L9 19.5l-2-1.2-2.5.7-2.4-4.2L4 13v-2L2.1 9.2 4.5 5l2.5.7 2-1.2Z"/>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -117,7 +127,7 @@
           <button type="button" class="btn btn--mini" id="btn-import">导入 JSON</button>
           <input id="import-file" type="file" accept=".json,application/json" hidden>
         </div>
-        <span class="field-hint">导出为 JSON 文件（含成本价），换设备后点导入即可恢复</span>
+        <span class="field-hint">备份包含成本价、数量、合约方向与杠杆</span>
       </div>
 
       <button id="btn-save-key" class="btn btn--primary">保存 Key</button>
@@ -125,25 +135,51 @@
 
     <section id="empty" class="empty hidden">
       <p>还没有自选股</p>
-      <p class="hint">在下方输入代码添加，例如 600000.SH、AAPL.US</p>
+      <p class="hint">点击「添加自选」输入代码，例如 600000.SH、AAPL.US</p>
     </section>
 
     <ul id="watchlist" class="list"></ul>
 
     <footer class="footer">
-      <div class="seg market-seg" id="market-seg" title="选择要搜索/添加的市场">
-        <button type="button" class="seg-btn active" data-market="auto">全部</button>
-        <button type="button" class="seg-btn" data-market="cn">A股</button>
-        <button type="button" class="seg-btn" data-market="hk">港股</button>
-        <button type="button" class="seg-btn" data-market="us">美股</button>
-        <button type="button" class="seg-btn" data-market="crypto">币安</button>
-      </div>
-      <form id="add-form" autocomplete="off">
-        <input id="symbol-input" type="text" placeholder="代码或名称，如 600000.SH / 浦发 / BTCUSDT" spellcheck="false">
-        <input id="cost-input" type="number" step="any" min="0" placeholder="成本(可选)" spellcheck="false">
-        <button type="submit" class="btn btn--primary">添加</button>
-      </form>
-      <div id="search-results" class="search-results hidden"></div>
+      <details id="add-panel">
+        <summary class="add-summary">添加自选</summary>
+        <div class="add-controls">
+          <div class="seg market-seg" id="market-seg" title="选择要搜索/添加的市场">
+            <button type="button" class="seg-btn active" data-market="auto">全部</button>
+            <button type="button" class="seg-btn" data-market="cn">A股</button>
+            <button type="button" class="seg-btn" data-market="hk">港股</button>
+            <button type="button" class="seg-btn" data-market="us">美股</button>
+            <button type="button" class="seg-btn" data-market="crypto">币安</button>
+          </div>
+          <form id="add-form" autocomplete="off" novalidate>
+            <div class="add-symbol-row">
+              <input id="symbol-input" type="text" aria-label="代码或名称" placeholder="代码或名称，如 600000.SH / 浦发 / BTCUSDT" spellcheck="false">
+              <button type="submit" class="btn btn--primary">添加</button>
+            </div>
+            <div class="position-fields">
+              <label class="position-field">成本价
+                <input id="cost-input" type="number" step="any" min="0" placeholder="可选" spellcheck="false">
+              </label>
+              <label class="position-field"><span id="quantity-label">数量（股）</span>
+                <input id="quantity-input" type="number" step="any" min="0" placeholder="可选" spellcheck="false">
+              </label>
+            </div>
+            <div id="contract-fields" class="position-fields hidden">
+              <label class="position-field">方向
+                <select id="side-input"><option value="long">做多</option><option value="short">做空</option></select>
+              </label>
+              <label class="position-field">杠杆倍数
+                <input id="leverage-input" type="number" step="1" min="1" value="1" inputmode="numeric">
+              </label>
+            </div>
+          </form>
+          <div id="search-results" class="search-results hidden"></div>
+          <div id="search-status" class="search-status hidden">
+            <span id="search-status-text" role="status" aria-live="polite"></span>
+            <button type="button" id="btn-retry-search" class="hidden">重试</button>
+          </div>
+        </div>
+      </details>
       <p id="error" class="error hidden"></p>
     </footer>
 

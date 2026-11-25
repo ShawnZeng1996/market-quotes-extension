@@ -63,12 +63,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // ---------- 配置 ----------
+let reconnectTask = null;
+
 async function readConfig() {
   const [local, sync] = await Promise.all([
-    chrome.storage.local.get(["apiKey", "enabled", "source", "tradingMarkets", "footerSymbols"]),
+    chrome.storage.local.get(["apiKey", "enabled", "source", "tradingMarkets", "footerSymbols", "quotes"]),
     chrome.storage.sync.get("watchlist"),
   ]);
   return {
+    quotes: local.quotes || {},
     apiKey: local.apiKey || "",
     enabled: local.enabled !== false, // 默认开启
     source: local.source || "tencent", // 默认腾讯免费
@@ -123,6 +126,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         .catch(() => sendResponse({ ok: false }));
       return true;
 
+    case "reconnect-quotes":
+      if (!reconnectTask) {
+        reconnectTask = ensureOffscreen()
+          .then(readConfig)
+          .then((config) => chrome.runtime.sendMessage({ type: "reconnect", ...config }))
+          .catch(() => ({ ok: false }))
+          .finally(() => { reconnectTask = null; });
+      }
+      reconnectTask.then(sendResponse);
+      return true;
+
     case "quotes": // 来自 offscreen，行情落盘
       chrome.storage.local.set({ quotes: msg.data }).catch(() => {});
       return false;
@@ -132,7 +146,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return false;
 
     case "status": // 来自 offscreen，状态落盘
-      chrome.storage.local.set({ status: { mode: msg.mode, text: msg.text } }).catch(() => {});
+      chrome.storage.local.set({ status: { mode: msg.mode, text: msg.text, cnClosed: msg.cnClosed === true } }).catch(() => {});
       return false;
 
     case "pl-alert": // 来自 offscreen，扭亏为盈 → 角标 + Bark 推送
