@@ -215,13 +215,16 @@ function parsePositionFields(raw, symbol) {
   }
   if (symbol.endsWith(".PERP")) {
     const side = raw.side ?? "long";
-    const leverage = raw.leverage == null ? 1 : Number(raw.leverage);
-    if (!["long", "short"].includes(side)) throw new Error("请选择做多或做空");
-    if (!Number.isSafeInteger(leverage) || leverage < 1 || (raw.leverage != null && !["string", "number"].includes(typeof raw.leverage))) {
-      throw new Error("杠杆倍数需为不小于 1 的整数");
-    }
+    if (!["", "long", "short"].includes(side)) throw new Error("请选择仅看行情、做多或做空");
     fields.side = side;
-    fields.leverage = leverage;
+    fields.leverage = null;
+    if (side !== "") {
+      const leverage = raw.leverage == null ? 1 : Number(raw.leverage);
+      if (!Number.isSafeInteger(leverage) || leverage < 1 || (raw.leverage != null && !["string", "number"].includes(typeof raw.leverage))) {
+        throw new Error("杠杆倍数需为不小于 1 的整数");
+      }
+      fields.leverage = leverage;
+    }
   }
   return fields;
 }
@@ -247,7 +250,7 @@ function renderPositionInputs() {
   const futures = !stock && (selectedMarket() === "crypto" || !!normalizeBinanceSymbol(raw));
   $("#contract-fields").classList.toggle("hidden", !futures);
   $("#side-input").disabled = !futures;
-  $("#leverage-input").disabled = !futures;
+  $("#leverage-input").disabled = !futures || $("#side-input").value === "";
   const symbol = stock || normalizeBinanceSymbol(raw);
   $("#quantity-label").textContent = symbol ? `数量（${quantityUnit(symbol)}）` : futures ? "数量（标的单位）" : "数量（股）";
   $("#quantity-input").title = futures ? "实际持仓数量，不是保证金或 USDT 金额" : "实际持仓股数";
@@ -368,12 +371,12 @@ async function onFooterOptionChange(symbol) {
 
 // 构建单个自选股行（分组渲染时复用）
 function buildPositionEditor(item) {
-  const input = (field, label, mode = "decimal") => `<label class="position-field">${escapeHtml(label)}<input class="position-input" data-field="${field}" type="text" inputmode="${mode}" autocomplete="off" spellcheck="false" value="${escapeHtml(editDraft[field] ?? "")}" placeholder="可选"></label>`;
+  const input = (field, label, mode = "decimal", disabled = false) => `<label class="position-field">${escapeHtml(label)}<input class="position-input" data-field="${field}" type="text" inputmode="${mode}" autocomplete="off" spellcheck="false" value="${escapeHtml(editDraft[field] ?? "")}" placeholder="可选"${disabled ? " disabled" : ""}></label>`;
   return `<div class="position-editor">
     <div class="position-fields">${input("cost", "成本价")}${input("quantity", `数量（${quantityUnit(item.symbol)}）`)}</div>
     ${item.symbol.endsWith(".PERP") ? `<div class="position-fields">
-      <label class="position-field">方向<select class="position-input" data-field="side"><option value="long"${editDraft.side === "long" ? " selected" : ""}>做多</option><option value="short"${editDraft.side === "short" ? " selected" : ""}>做空</option></select></label>
-      ${input("leverage", "杠杆倍数", "numeric")}</div>` : ""}
+      <label class="position-field">方向<select class="position-input" data-field="side"><option value=""${editDraft.side === "" ? " selected" : ""}>仅看行情</option><option value="long"${editDraft.side === "long" ? " selected" : ""}>做多</option><option value="short"${editDraft.side === "short" ? " selected" : ""}>做空</option></select></label>
+      ${input("leverage", "杠杆倍数", "numeric", editDraft.side === "")}</div>` : ""}
     <div class="position-actions"><button type="button" class="position-save">保存</button><button type="button" class="position-cancel">取消</button></div>
   </div>`;
 }
@@ -384,6 +387,7 @@ function buildRowHtml(item) {
   const cost = item.cost != null ? Number(item.cost) : null;
   const pl = calcPositionPl(item, q);
   const futures = item.symbol.endsWith(".PERP");
+  const quotesOnly = futures && item.side === "";
   const editing = state.editingSymbol === item.symbol;
 
   const daySub = `<div class="change ${changeClass(pct)}"${isCryptoSymbol(item.symbol) ? ' title="24小时涨跌幅"' : ""}>${pct == null ? "—" : formatPct(pct)}</div>`;
@@ -393,20 +397,20 @@ function buildRowHtml(item) {
     : "";
 
   const symbolHtml = `${escapeHtml(item.symbol)}${isCryptoSymbol(item.symbol) && !futures ? " · 现货" : ""}`;
-  const details = [
+  const details = quotesOnly ? "" : [
     cost != null ? `成本 ${formatPrice(cost, item.symbol)}` : "",
     item.quantity != null ? `数量 ${Number(item.quantity).toLocaleString("en-US", { maximumFractionDigits: 10 })} ${quantityUnit(item.symbol)}` : "",
     futures ? `${item.side === "short" ? "做空" : "做多"} · ${item.leverage ?? 1}x` : "",
   ].filter(Boolean).join(" · ");
 
-  const alertSwitch = (!editing && cost != null)
-    ? `<span class="alert-toggle">
-         <label class="mini-switch" title="盈利提示开关">
-           <input type="checkbox" class="alert-check" data-symbol="${escapeHtml(item.symbol)}"${item.alert === true ? " checked" : ""}>
-           <span class="mini-slider"></span>
-         </label>
+  const alertSwitch = (!editing && cost != null && !quotesOnly)
+    ? `<label class="alert-toggle" title="盈利提示开关">
          <span class="alert-label">盈利提示</span>
-       </span>`
+         <span class="mini-switch">
+           <input type="checkbox" class="alert-check" aria-label="${escapeHtml(item.symbol)} 盈利提示" data-symbol="${escapeHtml(item.symbol)}"${item.alert === true ? " checked" : ""}>
+           <span class="mini-slider"></span>
+         </span>
+       </label>`
     : "";
 
   return `
@@ -425,6 +429,15 @@ function buildRowHtml(item) {
     <button class="edit" data-symbol="${escapeHtml(item.symbol)}" title="编辑持仓" aria-label="编辑 ${escapeHtml(item.symbol)} 持仓">✎</button>
     <button class="remove" data-symbol="${escapeHtml(item.symbol)}" title="移除">×</button>
   `;
+}
+
+function marketPlAmount(items) {
+  let amount = null;
+  for (const item of items) {
+    const pl = calcPositionPl(item, state.quotes[item.symbol]);
+    if (pl?.amount != null) amount = (amount ?? 0) + pl.amount;
+  }
+  return amount;
 }
 
 function render() {
@@ -456,7 +469,9 @@ function render() {
       const header = document.createElement("li");
       header.className = "group-header" + (collapsed ? " collapsed" : "");
       header.dataset.group = g.key;
-      header.innerHTML = `<span class="group-arrow">▸</span><span class="group-label">${escapeHtml(g.label)}</span>`;
+      const amount = marketPlAmount(items);
+      header.innerHTML = `<span class="group-arrow">▸</span><span class="group-label">${escapeHtml(g.label)}</span>
+        <span class="group-pl ${changeClass(amount)}" title="仅汇总有成本、数量及有效报价的持仓，未计手续费及资金费">盈亏 ${amount == null ? "—" : formatAmount(amount)} ${positionCurrency(items[0].symbol)}</span>`;
       list.appendChild(header);
       if (collapsed) continue;
       for (const item of items) {
@@ -991,7 +1006,7 @@ function exportWatchlist() {
       name: w.name || "",
       cost: w.cost ?? null,
       quantity: w.quantity ?? null,
-      ...(w.symbol.endsWith(".PERP") ? { side: w.side ?? "long", leverage: w.leverage ?? 1 } : {}),
+      ...(w.symbol.endsWith(".PERP") ? { side: w.side ?? "long", leverage: w.side === "" ? null : w.leverage ?? 1 } : {}),
       alert: w.alert === true,
     })),
   };
@@ -1301,6 +1316,8 @@ function bindEvents() {
     chrome.storage.local.set({ barkEnabled: state.barkEnabled });
   });
 
+  $("#side-input").addEventListener("change", renderPositionInputs);
+
   $("#add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const values = {};
@@ -1384,6 +1401,9 @@ function bindEvents() {
   $("#watchlist").addEventListener("input", (e) => {
     if (e.target.classList.contains("position-input")) {
       editDraft[e.target.dataset.field] = e.target.value;
+      if (e.target.dataset.field === "side") {
+        $("#watchlist .position-input[data-field=\"leverage\"]").disabled = e.target.value === "";
+      }
       editRevision++;
       editField = e.target.dataset.field;
       editSelection = { start: e.target.selectionStart, end: e.target.selectionEnd, direction: e.target.selectionDirection };

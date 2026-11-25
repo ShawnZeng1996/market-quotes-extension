@@ -48,6 +48,7 @@ function calcPositionPl(item, quote) {
   const price = Number(quote.last_price);
   if (!Number.isFinite(cost) || cost <= 0 || !Number.isFinite(price) || price <= 0) return null;
   const futures = item.symbol.endsWith(".PERP");
+  if (futures && item.side === "") return null;
   const direction = futures && item.side === "short" ? -1 : 1;
   const leverage = futures ? Number(item.leverage ?? 1) : 1;
   const difference = (price - cost) * direction;

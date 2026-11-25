@@ -20,10 +20,10 @@ A Chrome extension for mainland Chinese, Hong Kong and US stocks, plus Binance U
 - An Offscreen Document owns connections and polling tasks, so closing the popup does not stop quote fetching.
 - **Manual reconnection:** click the header refresh icon or status text to retry quote connections.
 - **A-share schedule:** automatic fetching runs Monday–Friday, 09:15–15:00 Beijing time, retaining cached data outside those hours. Hong Kong, US and Binance channels are unaffected.
-- Add and remove watchlist entries, group by market, enter and edit cost prices and position quantities, and sync through `chrome.storage.sync`.
-- Binance USDT perpetuals support **long / short positions and leverage**, displaying P&L amounts and estimated return on initial margin. Legacy spot entries remain unleveraged long positions.
+- Add and remove watchlist entries, group by market, enter and edit cost prices and position quantities, and sync through `chrome.storage.sync`. Group headers show market P&L and keep updating while collapsed, in CNY / HKD / USD / USDT without currency conversion. Only positions with cost, quantity and a valid quote are included; no calculable amounts display `—`.
+- Binance USDT perpetuals support **quotes only / long / short**. New entries default to quotes only, disabling leverage and hiding position details, P&L and profit alerts; these entries are excluded from market totals. Long / short positions allow leverage and show P&L amounts and estimated return on initial margin. Legacy spot entries remain unleveraged long positions.
 - Enter actual holdings: shares for stocks, underlying quantity (such as BTC) for perpetuals, not a USDT amount. P&L = price difference × quantity × direction; margin return = direction-adjusted price change percentage × leverage. Leverage does not multiply P&L again. Fees, funding and added margin are excluded.
-- JSON backups include names, cost prices, quantities, perpetual direction and leverage, and profit-alert settings. Older backups without quantity show no P&L amount; perpetuals default to long at 1×.
+- JSON backups include names, cost prices, quantities, perpetual direction and leverage, and profit-alert settings, preserving the empty direction for quotes-only entries. Older backups without quantity show no P&L amount; perpetuals without a direction field default to long at 1×.
 - API and Bark keys stay in `chrome.storage.local` and are not synced across devices.
 - Red for gains, green for losses; adaptive decimal precision for Binance prices.
 - **Display mode:** System / Light / Dark, following the system appearance by default, with the preference saved locally.
